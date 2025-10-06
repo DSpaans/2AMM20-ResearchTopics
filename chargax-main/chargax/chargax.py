@@ -5,10 +5,10 @@ from typing import Dict, Literal, Tuple
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import jymkit as jym
+import jaxnasium as jym
 import numpy as np
 from jaxtyping import Array, Float, PRNGKeyArray
-from jymkit import TimeStep
+from jaxnasium import TimeStep
 
 from ._data_loaders import get_car_data, get_scenario
 from ._station_layout import ChargersState, ChargingStation, StationBattery
