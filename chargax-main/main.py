@@ -4,7 +4,7 @@ import numpy as np
 import optax
 from jaxnasium.algorithms import PPO
 
-from chargax import Chargax, get_electricity_prices  # noqa: E402
+from chargax import Chargax, get_electricity_prices
 
 if __name__ == "__main__":
     env = Chargax(
@@ -13,12 +13,23 @@ if __name__ == "__main__":
         minutes_per_timestep=5,
         num_discretization_levels=10,
         elec_customer_sell_price=0.75,
+        
+        # set cost weights to zero to disable them
+        capacity_exceeded_alpha=0.0,
+        charged_satisfaction_alpha=0.0,
+        time_satisfaction_alpha=0.0,
+        rejected_customers_alpha=0.0,
+        battery_degredation_alpha=0.0,
+        
+        # Set Lagrangian
+        lagrangian_enabled=True,
+        lagrangian_lr=5e-3,
     )
     env = jym.LogWrapper(env)
     rng = jax.random.PRNGKey(42)
 
     # RL Training with PPO
-    num_envs = 12
+    num_envs = 1
     num_steps = 300
     total_timesteps = int(1e7)
     num_epochs = 4

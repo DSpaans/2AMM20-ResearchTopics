@@ -35,6 +35,12 @@ class EnvState(eqx.Module):
     exceeded_capacity: float = 0.0
     total_charged_kw: float = 0.0
     total_discharged_kw: float = 0.0
+    
+    # Lagrangian PPO state
+    # lambdas: Array = jnp.zeros(5)  # We hardcode the 5 constraints for now but this should be easy to change
+    # ep_cost: Array = jnp.zeros(5)
+    lambdas: Array = eqx.field(default_factory=lambda: jnp.zeros(5, dtype=jnp.float32))
+    ep_cost: Array = eqx.field(default_factory=lambda: jnp.zeros(5, dtype=jnp.float32))
 
 
 class Chargax(jym.Environment):
@@ -78,6 +84,17 @@ class Chargax(jym.Environment):
     allow_discharging: bool = True
 
     full_info_dict: bool = False
+    
+    # Lagrangian PPO variables
+    lagrangian_enabled: bool = True
+    # Learning rate for lambda updates
+    lagrangian_lr: float = 5e-3
+    # We use this order of the keys for the target values
+    lagrangian_cost_keys: tuple = ("exceeded_capacity", "rejected", "uncharged_kw", "overtime", "battery_degradation")
+    # episodic targets d_i for each of the constraints. We can tweak these
+    lagrangian_targets: jnp.ndarray = eqx.field(
+        default_factory=lambda: jnp.array([0.0, 5.0, 50.0, 0.0, 25.0], dtype=jnp.float32)
+    )
 
     @property
     def max_episode_steps(self) -> int:
@@ -170,13 +187,66 @@ class Chargax(jym.Environment):
             chargers_state=charger_state,
             timestep=old_state.timestep + 1,  # advance time while we are at it
         )
+        
+        # compute costs and Lagrangian update
+        c_vec, c_dict = self._cost_vector(old_state, new_state)
+
+        # Add episode costs to total
+        new_ep_cost = old_state.ep_cost + c_vec
+
+        # Termination flags and traced "done"
+        terminated = self.get_terminated(new_state)
+        truncated  = self.get_truncated(new_state)
+        done = jnp.logical_or(terminated, truncated)
+
+        # Lagrangian lambda update at episode end
+        def _end(_):
+            new_lambdas = jnp.maximum(
+                0.0,
+                old_state.lambdas + self.lagrangian_lr * (new_ep_cost - self.lagrangian_targets)
+            )
+            return new_lambdas, jnp.zeros_like(new_ep_cost)
+
+        # If not done, keep old lambdas and ep_cost
+        def _cont(_):
+            return old_state.lambdas, new_ep_cost
+
+        new_lambdas, final_ep_cost = jax.lax.cond(done, _end, _cont, operand=None)
+
+        # Carry updated lambda and (maybe reset) episode cost into the new state
+        new_state = replace(new_state, lambdas=new_lambdas, ep_cost=final_ep_cost)
+
+        # Shaped reward: use lambda from the old state to compute the difference
+        profit_delta  = new_state.profit - old_state.profit
+        shaped_reward = profit_delta - jnp.dot(old_state.lambdas, c_vec)
+
+        # Choose which reward PPO sees, we can still use non lagrnagian reward
+        if self.lagrangian_enabled:
+            reward_out = shaped_reward
+        else:
+            reward_out = self.get_reward(old_state, new_state)
+
+        # ep_cost and updated lambdas
+        episode_costs_info   = jnp.where(done, new_ep_cost, jnp.zeros_like(new_ep_cost))
+        updated_lambdas_info = new_lambdas  # equals old_state.lambdas if not done
+
+        # Return data
+        base_info = self.get_info(new_state, actions, old_state=old_state)
+        lag_info  = {
+            "costs": c_dict,
+            "lambdas": old_state.lambdas,
+            "targets": self.lagrangian_targets,
+            "episode_costs": episode_costs_info,
+            "updated_lambdas": updated_lambdas_info,
+            "done": done,
+        }
 
         timestep_object = jym.TimeStep(
             observation=self.get_observation(new_state),
-            reward=self.get_reward(old_state, new_state),
-            terminated=self.get_terminated(new_state),
-            truncated=self.get_truncated(new_state),
-            info=self.get_info(new_state, actions, old_state=old_state),
+            reward=reward_out,
+            terminated=terminated,
+            truncated=truncated,
+            info={**base_info, **lag_info},
         )
 
         return timestep_object, new_state
@@ -615,6 +685,25 @@ class Chargax(jym.Environment):
             + self.capacity_exceeded_alpha * exceeded_capacity_delta
             + self.battery_degredation_alpha * battery_degredation_delta
         )
+        
+    # Compute the difference in costs between old and new state
+    def _cost_vector(self, old_state: EnvState, new_state: EnvState):
+        
+        uncharged_delta = new_state.uncharged_kw - old_state.uncharged_kw
+        charged_overtime_delta = new_state.charged_overtime - old_state.charged_overtime
+        rejected_delta = new_state.rejected_customers - old_state.rejected_customers
+        exceeded_capacity_delta = new_state.exceeded_capacity - old_state.exceeded_capacity
+        battery_deg_delta = new_state.total_discharged_kw - old_state.total_discharged_kw
+
+        mapping = {
+            "exceeded_capacity": exceeded_capacity_delta,
+            "rejected": rejected_delta,
+            "uncharged_kw": uncharged_delta,
+            "overtime": charged_overtime_delta,
+            "battery_degradation": battery_deg_delta,
+        }
+        vec = jnp.asarray([mapping[k] for k in self.lagrangian_cost_keys], jnp.float32)
+        return vec, mapping
 
     def get_terminated(self, state: EnvState) -> bool:
         return False
