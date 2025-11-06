@@ -44,8 +44,9 @@ if __name__ == "__main__":
     num_epochs = 4
     num_training_iterations = (total_timesteps // num_steps // num_envs) * num_epochs
     
+    # Fix: Use 2.5e-4 instead of 2.5e-3 as per paper specification
     optimizer = optax.adam(
-        learning_rate=optax.linear_schedule(2.5e-3, 2.5e-5, num_training_iterations)
+        learning_rate=optax.linear_schedule(2.5e-4, 2.5e-5, num_training_iterations)
     )
     
     agent = PPO(  # Not optimized, just a simple example

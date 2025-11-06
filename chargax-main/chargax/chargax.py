@@ -52,7 +52,7 @@ class Chargax(jym.Environment):
     user_profiles: Literal[
         "highway", "residential", "workplace", "shopping", "custom"
     ] = eqx.field(converter=str.lower, default="shopping")
-    arrival_frequency: int | Literal["low", "medium", "high"] = 100
+    arrival_frequency: int = 100  # Literal["low", "medium", "high"] or int
 
     # Station:
     station: ChargingStation = ChargingStation()
